@@ -94,6 +94,7 @@ class MXFaceDataset(Dataset):
         idx = self.imgidx[index]
         s = self.imgrec.read_idx(idx)
         header, img = mx.recordio.unpack(s)
+
         label = header.label
         if not isinstance(label, numbers.Number):
             label = label[0]
@@ -101,11 +102,10 @@ class MXFaceDataset(Dataset):
         sample = mx.image.imdecode(img).asnumpy()
         if self.transform is not None:
             sample = self.transform(sample)
-        return sample, label
+        return sample, label, idx
 
     def __len__(self):
         return len(self.imgidx)
-
 
 class SyntheticDataset(Dataset):
     def __init__(self, local_rank):

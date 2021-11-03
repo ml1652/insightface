@@ -10,13 +10,13 @@ config.network = "r50"
 config.resume = False
 config.output = "ms1mv3_arcface_r50"
 
-config.dataset = "ms1m-retinaface-t1"
+config.dataset = "webface"
 config.embedding_size = 512
 config.sample_rate = 1
 config.fp16 = False
 config.momentum = 0.9
 config.weight_decay = 5e-4
-config.batch_size = 128
+config.batch_size = 16
 config.lr = 0.1  # batch size is 512
 
 if config.dataset == "emore":
@@ -47,8 +47,18 @@ elif config.dataset == "glint360k":
     config.val_targets = ["lfw", "cfp_fp", "agedb_30"]
 
 elif config.dataset == "webface":
-    config.rec = "/train_tmp/faces_webface_112x112"
+    config.rec = r"E:\FaceDatesets\faces_webface_112x112"
     config.num_classes = 10572
+    config.num_image = "forget"
+    config.num_epoch = 34
+    config.warmup_epoch = -1
+    config.decay_epoch = [20, 28, 32]
+    config.val_targets = ["lfw", "cfp_fp", "agedb_30"]
+
+
+elif config.dataset == "vggface2":
+    config.rec = "/train_tmp/faces_vgg_112x112"
+    config.num_classes = 9131
     config.num_image = "forget"
     config.num_epoch = 34
     config.warmup_epoch = -1

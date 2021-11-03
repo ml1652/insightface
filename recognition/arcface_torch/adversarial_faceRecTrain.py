@@ -17,8 +17,11 @@ from utils.utils_callbacks import CallBackVerification, CallBackLogging, CallBac
 from utils.utils_config import get_config
 from utils.utils_logging import AverageMeter, init_logging
 import json
+from discriminator import CelebaRegressor
 
 # -m torch.distributed.launch --nproc_per_node=1 --nnodes=1 --node_rank=0 --master_addr="127.0.0.1" --master_port=2234
+
+
 
 def main(args):
     cfg = get_config(args.config)
@@ -46,6 +49,8 @@ def main(args):
         local_rank=local_rank, dataset=train_set, batch_size=cfg.batch_size,
         sampler=train_sampler, num_workers=2, pin_memory=True, drop_last=True)
     backbone = get_model(cfg.network, dropout=0.0, fp16=cfg.fp16, num_features=cfg.embedding_size).to(local_rank)
+    num_input_features = 512
+    netD = CelebaRegressor(num_input_features).cuda()
 
     if cfg.resume:
         try:
@@ -60,6 +65,11 @@ def main(args):
     backbone = torch.nn.parallel.DistributedDataParallel(
         module=backbone, broadcast_buffers=False, device_ids=[local_rank])
     backbone.train()
+
+    netD = torch.nn.parallel.DistributedDataParallel(
+        module=netD, broadcast_buffers=False, device_ids=[local_rank])
+    netD.train()
+
     margin_softmax = losses.get_loss(cfg.loss)
     module_partial_fc = PartialFC(
         rank=rank, local_rank=local_rank, world_size=world_size, resume=cfg.resume,
@@ -72,6 +82,10 @@ def main(args):
         momentum=0.9, weight_decay=cfg.weight_decay)
     opt_pfc = torch.optim.SGD(
         params=[{'params': module_partial_fc.parameters()}],
+        lr=cfg.lr / 512 * cfg.batch_size * world_size,
+        momentum=0.9, weight_decay=cfg.weight_decay)
+    opt_netD = torch.optim.SGD(
+        params=[{'params': netD.parameters()}],
         lr=cfg.lr / 512 * cfg.batch_size * world_size,
         momentum=0.9, weight_decay=cfg.weight_decay)
 
@@ -87,10 +101,11 @@ def main(args):
         else:
             return 0.1 ** len([m for m in cfg.decay_step if m <= current_step])
 
-    scheduler_backbone = torch.optim.lr_scheduler.LambdaLR(
+    scheduler_backbone = torch.optim.lr_scheduler.LambdaLR( #lr_scheduler用来调增学习率
         optimizer=opt_backbone, lr_lambda=lr_step_func)
     scheduler_pfc = torch.optim.lr_scheduler.LambdaLR(
         optimizer=opt_pfc, lr_lambda=lr_step_func)
+    scheduler_netD = torch.optim.lr_scheduler.LambdaLR(optimizer=opt_netD,lr_lambda=lr_step_func)
 
     for key, value in cfg.items():
         num_space = 25 - len(key)
@@ -106,33 +121,53 @@ def main(args):
     global_step = 0
     #混合精度：在训练最开始之前实例化一个GradS对象初始化grad_amp，混合精度训练的初始化
     grad_amp = MaxClipGradScaler(cfg.batch_size, 128 * cfg.batch_size, growth_interval=100) if cfg.fp16 else None
+
+    criterion = torch.nn.CrossEntropyLoss()
+    attribute_D = "happy"
     for epoch in range(start_epoch, cfg.num_epoch):
         train_sampler.set_epoch(epoch)
-        for step, (img, label, idx) in enumerate(train_loader):
+        for step, (img, label, idx) in enumerate(train_loader): #image.shape=[]
             global_step += 1
             features = F.normalize(backbone(img))
+            non_id_label_batch = []
+            for i in idx:
+                json_dir = "/scratch/ml1652/code/insightface/recognition/arcface_torch/ms1m-retinaface-t1_deepfaceLable/%d.json"%i
+                with open(json_dir, 'r') as f:
+                    non_id_label = json.load(f)
+                non_id_label_batch.append(non_id_label["emotion"][attribute_D])
 
-            json_dir = "/scratch/ml1652/code/insightface/recognition/arcface_torch/ms1m-retinaface-t1_deepfaceLable/%d.json"%idx
-            with open(json_dir, 'r') as f:
-                non_id_label = json.load(f)
-
-            #Update discriminator:
+            ############################
+            # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
+            ###########################
             #Pass features into discriminator
             #Compute cross entropy loss using our labels
             #opt_discriminator.zero_grad()
             #Call disc_loss.backward()
             #Call opt_discriminator.step()
+            netD.zero_grad()
+            output_netD =netD(features)
+            errD_real = criterion(output_netD, non_id_label_batch)
+            errD_real.backward()
+            opt_netD.step()
+            D_x = output_netD.mean().item()
+
 
             # We don't want the discriminator to improve by changing the backbone
             #opt_backbone.zero_grad()
-
             # Pass features into discriminator
             # Compute cross entropy loss using our labels
             # disc_loss = -disc_loss
             # Call disc_loss.backward()
             # The backbone gradients will now contain information
             # on how to make the discriminator's performance worse
+            output_netD =netD(features)
+            errD_real = criterion(output_netD, non_id_label_batch)
+            errD_neg = -errD_real
+            errD_neg.backward()
 
+            ############################
+            # (2) Update G network: maximize log(D(G(z)))
+            ###########################
             x_grad, loss_v = module_partial_fc.forward_backward(label, features, opt_pfc)
             if cfg.fp16: #因为是半精度，当模型接近于收敛的时候，模型梯度变小，出现下溢出
                 features.backward(grad_amp.scale(x_grad)) #因为半精度的数值范围有限，因此需要将loss 乘以一个scale.用它放大

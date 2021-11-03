@@ -17,7 +17,7 @@ config.weight_decay = 5e-4
 config.batch_size = 128
 config.lr = 0.1  # batch size is 512
 
-config.rec = "/train_tmp/ms1m-retinaface-t1"
+config.rec = "/scratch/ml1652/database/ms1m-retinaface-t1"
 config.num_classes = 93431
 config.num_image = 5179510
 config.num_epoch = 25
